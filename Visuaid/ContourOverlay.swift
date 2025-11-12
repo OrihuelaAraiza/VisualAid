@@ -16,22 +16,21 @@ struct ContourOverlay: View {
     let strokeColor: Color
 
     var body: some View {
-        Canvas { context, size in
+        Canvas { context, canvasSize in
             guard imageSize.width > 0, imageSize.height > 0 else { return }
 
-            let scaleX = size.width / imageSize.width
-            let scaleY = size.height / imageSize.height
+            // Escalas de mapeo de coordenadas de imagen → canvas
+            let scaleX = canvasSize.width / imageSize.width
+            let scaleY = canvasSize.height / imageSize.height
 
             for contour in contours {
-                if let path = contour.normalizedPath {
-                    var cgPath = path.copy()
-                    var transform = CGAffineTransform(scaleX: imageSize.width, y: imageSize.height)
-                    cgPath = cgPath.copy(using: &transform) ?? cgPath
-                    var scale = CGAffineTransform(scaleX: scaleX, y: scaleY)
-                    cgPath = cgPath.copy(using: &scale) ?? cgPath
+                // Construye un path en coordenadas de imagen (pixeles), luego escala a canvas
+                guard let cgPath = contour.pathInImage(ofSize: imageSize) else { continue }
 
-                    context.stroke(Path(cgPath), with: .color(strokeColor), lineWidth: 1.5)
-                }
+                var scale = CGAffineTransform(scaleX: scaleX, y: scaleY)
+                let scaledPath = cgPath.copy(using: &scale) ?? cgPath
+
+                context.stroke(Path(scaledPath), with: .color(strokeColor), lineWidth: 1.5)
             }
         }
         .drawingGroup()
@@ -40,23 +39,30 @@ struct ContourOverlay: View {
 }
 
 private extension VNContour {
-    var normalizedPath: CGPath? {
-        var points: [CGPoint] = []
-        do {
-            try self.enumeratePoints { point, _ in
-                points.append(CGPoint(x: CGFloat(point.x), y: CGFloat(1 - point.y))) // invertir Y
-            }
-        } catch {
-            return nil
-        }
+    // Devuelve un CGPath en coordenadas de imagen (0...imageSize)
+    func pathInImage(ofSize imageSize: CGSize) -> CGPath? {
+        let count = pointCount
+        guard count > 0 else { return nil }
+
+        // VNContour solo expone puntos normalizados (0...1)
+        let normalized = self.normalizedPoints
+        guard normalized.count == count else { return nil }
+
         let path = CGMutablePath()
-        if let first = points.first {
-            path.move(to: first)
-            for p in points.dropFirst() {
-                path.addLine(to: p)
+        var first = true
+        for p in normalized {
+            // Convertir a coordenadas de imagen (pixeles)
+            let imgPoint = CGPoint(x: CGFloat(p.x) * imageSize.width,
+                                   y: CGFloat(p.y) * imageSize.height)
+            if first {
+                path.move(to: imgPoint)
+                first = false
+            } else {
+                path.addLine(to: imgPoint)
             }
-            path.closeSubpath()
         }
+        path.closeSubpath()
         return path
     }
 }
+

@@ -5,12 +5,13 @@
 //  Created by You on 11/11/25.
 //
 //  Conversiones RGB↔HSV↔Lab y naming de color dominante.
-//  Basado en conceptos de 7_modelosColor.pdf
+//  Mejora: cálculo robusto de color dominante con ROI, ponderación y hue circular.
 //
 
 import CoreGraphics
 import CoreImage
 import SwiftUI
+import simd
 
 struct HSV {
     var h: CGFloat // 0...360
@@ -118,33 +119,135 @@ struct ColorUtilities {
         return Lab(L: L, a: a, b: b)
     }
 
-    // Estimar color dominante en HSV usando un muestreo simple del bitmap (rápido)
-    static func dominantHSV(from cgImage: CGImage) -> HSV {
-        // Muestreo en cuadrícula para rendimiento
+    // Convierte cualquier CGImage a un buffer RGBA8 contiguo seguro para lectura
+    private static func normalizedRGBAData(from cgImage: CGImage) -> (data: [UInt8], bytesPerRow: Int)? {
         let width = cgImage.width
         let height = cgImage.height
-        let stepX = max(1, width / 64)
-        let stepY = max(1, height / 64)
+        let bytesPerPixel = 4
+        let bytesPerRow = width * bytesPerPixel
+        var data = [UInt8](repeating: 0, count: bytesPerRow * height)
 
-        guard let data = cgImage.dataProvider?.data as Data? else {
+        guard let colorSpace = cgImage.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
+
+        guard let ctx = CGContext(
+            data: &data,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder32Big.rawValue
+        ) else {
+            return nil
+        }
+
+        let rect = CGRect(x: 0, y: 0, width: width, height: height)
+        ctx.draw(cgImage, in: rect)
+        return (data, bytesPerRow)
+    }
+
+    // Dominante robusto:
+    // - ROI central (para evitar bordes/fondos)
+    // - Descarta píxeles con S baja y V muy bajo/alto extremos
+    // - Hue circular ponderado por S y V
+    static func dominantHSV(from cgImage: CGImage,
+                            roiFraction: CGFloat = 0.6,
+                            minSaturation: CGFloat = 0.15,
+                            minValue: CGFloat = 0.1,
+                            maxValue: CGFloat = 0.98) -> HSV {
+
+        guard let buffer = normalizedRGBAData(from: cgImage) else {
             return HSV(h: 0, s: 0, v: 0)
         }
-        let bytes = [UInt8](data)
-        let bytesPerPixel = cgImage.bitsPerPixel / 8
-        let bytesPerRow = cgImage.bytesPerRow
+        let bytes = buffer.data
+        let bytesPerRow = buffer.bytesPerRow
+        let width = cgImage.width
+        let height = cgImage.height
+        let bytesPerPixel = 4 // RGBA
 
+        // ROI central
+        let roiW = Int(CGFloat(width) * roiFraction)
+        let roiH = Int(CGFloat(height) * roiFraction)
+        let startX = max(0, (width - roiW) / 2)
+        let startY = max(0, (height - roiH) / 2)
+        let endX = min(width, startX + roiW)
+        let endY = min(height, startY + roiH)
+
+        // Acumuladores para hue circular y ponderación
+        var sumX: CGFloat = 0 // cos(h)
+        var sumY: CGFloat = 0 // sin(h)
+        var sumS: CGFloat = 0
+        var sumV: CGFloat = 0
+        var weightSum: CGFloat = 0
+
+        // Muestreo en cuadrícula (salto adaptativo)
+        let stepX = max(1, roiW / 96)
+        let stepY = max(1, roiH / 96)
+
+        for y in stride(from: startY, to: endY, by: stepY) {
+            let rowBase = y * bytesPerRow
+            for x in stride(from: startX, to: endX, by: stepX) {
+                let offset = rowBase + x * bytesPerPixel
+                if offset + 3 < bytes.count {
+                    // RGBA (premultiplied last, byteOrder32Big)
+                    let r = CGFloat(bytes[offset + 0]) / 255.0
+                    let g = CGFloat(bytes[offset + 1]) / 255.0
+                    let b = CGFloat(bytes[offset + 2]) / 255.0
+                    // alpha = bytes[offset + 3] (no usado)
+
+                    let hsv = rgbToHSV(r: r, g: g, b: b)
+
+                    // Filtro de calidad
+                    if hsv.s < minSaturation { continue }
+                    if hsv.v < minValue || hsv.v > maxValue { continue }
+
+                    // Peso por saturación y valor (colores más saturados y bien expuestos pesan más)
+                    let w = hsv.s * clamp((hsv.v - minValue) / (maxValue - minValue), 0, 1)
+
+                    // Hue circular a radianes
+                    let rad = hsv.h * .pi / 180.0
+                    sumX += cos(rad) * w
+                    sumY += sin(rad) * w
+
+                    sumS += hsv.s * w
+                    sumV += hsv.v * w
+                    weightSum += w
+                }
+            }
+        }
+
+        if weightSum == 0 {
+            // Fallback: muestreo simple del bitmap completo (conversión previa asegura canales)
+            return simpleAverageHSV(from: bytes, width: width, height: height, bytesPerRow: bytesPerRow)
+        }
+
+        let avgH = atan2(sumY, sumX) * 180.0 / .pi
+        let hue = avgH < 0 ? avgH + 360.0 : avgH
+        let sat = sumS / weightSum
+        let val = sumV / weightSum
+
+        return HSV(h: hue, s: sat, v: val)
+    }
+
+    // Fallback simple (por si el filtro deja sin pesos válidos)
+    private static func simpleAverageHSV(from bytes: [UInt8], width: Int, height: Int, bytesPerRow: Int) -> HSV {
+        let bytesPerPixel = 4
         var accumH: CGFloat = 0
         var accumS: CGFloat = 0
         var accumV: CGFloat = 0
         var count: CGFloat = 0
 
+        let stepX = max(1, width / 64)
+        let stepY = max(1, height / 64)
+
         for y in stride(from: 0, to: height, by: stepY) {
+            let rowBase = y * bytesPerRow
             for x in stride(from: 0, to: width, by: stepX) {
-                let offset = y * bytesPerRow + x * bytesPerPixel
+                let offset = rowBase + x * bytesPerPixel
                 if offset + 3 < bytes.count {
-                    let b = CGFloat(bytes[offset + 0]) / 255.0
+                    let r = CGFloat(bytes[offset + 0]) / 255.0
                     let g = CGFloat(bytes[offset + 1]) / 255.0
-                    let r = CGFloat(bytes[offset + 2]) / 255.0
+                    let b = CGFloat(bytes[offset + 2]) / 255.0
                     let hsv = rgbToHSV(r: r, g: g, b: b)
                     accumH += hsv.h
                     accumS += hsv.s
@@ -155,6 +258,10 @@ struct ColorUtilities {
         }
         if count == 0 { return HSV(h: 0, s: 0, v: 0) }
         return HSV(h: accumH / count, s: accumS / count, v: accumV / count)
+    }
+
+    private static func clamp(_ x: CGFloat, _ a: CGFloat, _ b: CGFloat) -> CGFloat {
+        return min(max(x, a), b)
     }
 
     // Nombre descriptivo del color (simple pero útil para UX)
@@ -196,7 +303,6 @@ struct ColorUtilities {
     }
 
     // Matrices 3x3 para simulación/corrección de daltonismo
-    // Valores de ejemplo comunes en literatura; ajustables.
     static var protanopiaMatrix: simd_float3x3 {
         simd_float3x3(rows: [
             simd_float3(0.566, 0.433, 0.0),
@@ -213,3 +319,4 @@ struct ColorUtilities {
         ])
     }
 }
+

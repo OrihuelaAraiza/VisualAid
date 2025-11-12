@@ -2,65 +2,41 @@
 //  CameraView.swift
 //  Visuaid
 //
-//  Created by You on 11/11/25.
-//
-//  Vista principal: integra captura de cámara + procesamiento + overlay de contornos + controles UI.
+//  Created by JP on 11/11/25.
 //
 
 import SwiftUI
 import AVFoundation
+import Vision
 
 struct CameraView: View {
     @StateObject private var camera = CameraService()
     @StateObject private var processor = ImageProcessor()
     @StateObject private var speaker = ColorSpeaker()
 
-    // Controles UI
-    @State private var selectedProcessing: ProcessingMode = .original
-    @State private var selectedThreshold: ThresholdMode = .global
-    @State private var selectedEdges: EdgeMode = .none
+    // UI mínima
     @State private var selectedDaltonism: ColorBlindnessMode = .none
-    @State private var globalT: Double = 0.5
-    @State private var adaptiveC: Double = 0.05
-    @State private var showContours = false
     @State private var speakColor = true
 
-    var body: some View {
-        VStack(spacing: 0) {
-            ZStack {
-                if let cg = processor.outputCGImage {
-                    GeometryReader { geo in
-                        let size = geo.size
-                        let image = Image(decorative: cg, scale: 1, orientation: .up, label: Text("Camera"))
-                        image
-                            .resizable()
-                            .scaledToFill()
-                            .frame(width: size.width, height: size.height)
-                            .clipped()
-                            .overlay(
-                                ContourOverlay(contours: processor.contours,
-                                               imageSize: CGSize(width: cg.width, height: cg.height),
-                                               strokeColor: .yellow)
-                                    .opacity(showContours ? 1 : 0)
-                            )
-                    }
-                } else {
-                    Rectangle().fill(.black.opacity(0.95))
-                    ProgressView("Iniciando cámara…")
-                        .tint(.white)
-                        .foregroundStyle(.white)
-                }
+    // Control de actividad/visibilidad
+    @State private var isActive: Bool = true
 
-                VStack {
-                    topBar
-                    Spacer()
-                    bottomControls
-                }
-                .padding()
+    var body: some View {
+        ZStack {
+            CameraFeedView(
+                outputCGImage: processor.outputCGImage
+            )
+            .ignoresSafeArea()
+
+            VStack {
+                topBar
+                Spacer()
+                bottomControls
             }
+            .padding()
         }
         .onChange(of: processor.lastDominantName) { _, new in
-            if speakColor {
+            if speakColor, isActive {
                 speaker.speak(new)
             }
         }
@@ -68,35 +44,27 @@ struct CameraView: View {
             do {
                 try await camera.configure()
                 camera.onSampleBuffer = { [weak processor] buffer in
-                    Task { @MainActor in processor?.process(sampleBuffer: buffer) }
+                    Task { @MainActor in
+                        if isActive {
+                            processor?.process(sampleBuffer: buffer)
+                        }
+                    }
                 }
                 camera.start()
             } catch {
-                // Manejo simple de error de permisos/configuración
+                // Puedes mostrar una alerta si lo deseas
             }
         }
-        .onDisappear {
-            camera.stop()
-        }
-        .onChange(of: selectedProcessing) { _, v in processor.processingMode = v }
-        .onChange(of: selectedThreshold) { _, v in processor.thresholdMode = v }
-        .onChange(of: selectedEdges) { _, v in processor.edgeMode = v }
-        .onChange(of: selectedDaltonism) { _, v in processor.colorBlindness = v }
-        .onChange(of: globalT) { _, v in processor.globalThreshold = Float(v) }
-        .onChange(of: adaptiveC) { _, v in processor.adaptiveC = Float(v) }
-        .onChange(of: showContours) { _, v in processor.showContours = v }
-        .onChange(of: speakColor) { _, v in speaker.isEnabled = v }
         .onAppear {
-            // Inicializar estados en el procesador/speaker
-            processor.processingMode = selectedProcessing
-            processor.thresholdMode = selectedThreshold
-            processor.edgeMode = selectedEdges
+            isActive = true
             processor.colorBlindness = selectedDaltonism
-            processor.globalThreshold = Float(globalT)
-            processor.adaptiveC = Float(adaptiveC)
-            processor.showContours = showContours
             speaker.isEnabled = speakColor
         }
+        .onDisappear {
+            isActive = false
+        }
+        .onChange(of: selectedDaltonism) { _, v in processor.colorBlindness = v }
+        .onChange(of: speakColor) { _, v in speaker.isEnabled = v }
     }
 
     private var topBar: some View {
@@ -108,7 +76,7 @@ struct CameraView: View {
                 if !processor.lastDominantName.isEmpty {
                     Text(processor.lastDominantName)
                         .font(.subheadline)
-                        .foregroundStyle(.white.opacity(0.8))
+                        .foregroundStyle(.white.opacity(0.9))
                 }
             }
             Spacer()
@@ -124,72 +92,49 @@ struct CameraView: View {
     }
 
     private var bottomControls: some View {
-        VStack(spacing: 12) {
-            // Modo de procesamiento
-            Picker("Modo", selection: $selectedProcessing) {
-                ForEach(ProcessingMode.allCases) { mode in
-                    Text(mode.rawValue).tag(mode)
+        HStack(spacing: 12) {
+            Image(systemName: "eye.fill")
+                .foregroundStyle(.white)
+            Picker("Daltonismo", selection: $selectedDaltonism) {
+                ForEach(ColorBlindnessMode.allCases) { m in
+                    Text(m.rawValue)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                        .tag(m)
                 }
             }
             .pickerStyle(.segmented)
-
-            HStack(spacing: 12) {
-                // Umbral
-                VStack(alignment: .leading) {
-                    Picker("Threshold", selection: $selectedThreshold) {
-                        ForEach(ThresholdMode.allCases) { m in
-                            Text(m.rawValue).tag(m)
-                        }
-                    }
-                    .pickerStyle(.menu)
-
-                    if selectedThreshold == .global {
-                        HStack {
-                            Text("T")
-                            Slider(value: $globalT, in: 0...1)
-                            Text(String(format: "%.2f", globalT))
-                                .monospacedDigit()
-                                .frame(width: 48, alignment: .trailing)
-                        }
-                    } else {
-                        HStack {
-                            Text("C")
-                            Slider(value: $adaptiveC, in: 0...0.3)
-                            Text(String(format: "%.2f", adaptiveC))
-                                .monospacedDigit()
-                                .frame(width: 48, alignment: .trailing)
-                        }
-                    }
-                }
-
-                // Bordes
-                VStack(alignment: .leading) {
-                    Picker("Bordes", selection: $selectedEdges) {
-                        ForEach(EdgeMode.allCases) { m in
-                            Text(m.rawValue).tag(m)
-                        }
-                    }
-                    .pickerStyle(.menu)
-
-                    Toggle("Contornos", isOn: $showContours)
-                        .toggleStyle(.switch)
-                }
-            }
-
-            // Daltonismo
-            HStack {
-                Image(systemName: "eye.fill")
-                Picker("Daltonismo", selection: $selectedDaltonism) {
-                    ForEach(ColorBlindnessMode.allCases) { m in
-                        Text(m.rawValue).tag(m)
-                    }
-                }
-                .pickerStyle(.segmented)
-            }
-
         }
         .padding(12)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .foregroundStyle(.white)
+    }
+}
+
+private struct CameraFeedView: View {
+    let outputCGImage: CGImage?
+
+    var body: some View {
+        Group {
+            if let cg = outputCGImage {
+                GeometryReader { geo in
+                    let size: CGSize = geo.size
+                    let img = Image(decorative: cg, scale: 1, orientation: .up)
+
+                    img
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: size.width, height: size.height)
+                        .clipped()
+                }
+            } else {
+                ZStack {
+                    Rectangle().fill(.black.opacity(0.95))
+                    ProgressView("Iniciando cámara…")
+                        .tint(.white)
+                        .foregroundStyle(.white)
+                }
+            }
+        }
     }
 }
