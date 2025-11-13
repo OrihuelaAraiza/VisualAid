@@ -11,12 +11,13 @@ import Vision
 
 struct CameraView: View {
     @StateObject private var camera = CameraService()
-    @StateObject private var processor = ImageProcessor()
-    @StateObject private var speaker = ColorSpeaker()
+
+    // Ahora son inyectados desde fuera para evitar duplicados y permitir el pipeline en el VM
+    @ObservedObject var processor: ImageProcessor
+    @ObservedObject var speaker: ColorSpeaker
 
     // UI mínima
     @State private var selectedDaltonism: ColorBlindnessMode = .none
-    @State private var speakColor = true
 
     // Control de actividad/visibilidad
     @State private var isActive: Bool = true
@@ -34,11 +35,6 @@ struct CameraView: View {
                 bottomControls
             }
             .padding()
-        }
-        .onChange(of: processor.lastDominantName) { _, new in
-            if speakColor, isActive {
-                speaker.speak(new)
-            }
         }
         .task {
             do {
@@ -58,13 +54,12 @@ struct CameraView: View {
         .onAppear {
             isActive = true
             processor.colorBlindness = selectedDaltonism
-            speaker.isEnabled = speakColor
+            // El speaker.isEnabled ya se sincroniza desde Settings en el ViewModel
         }
         .onDisappear {
             isActive = false
         }
         .onChange(of: selectedDaltonism) { _, v in processor.colorBlindness = v }
-        .onChange(of: speakColor) { _, v in speaker.isEnabled = v }
     }
 
     private var topBar: some View {
@@ -80,8 +75,11 @@ struct CameraView: View {
                 }
             }
             Spacer()
-            Toggle(isOn: $speakColor) {
-                Image(systemName: speakColor ? "speaker.wave.2.fill" : "speaker.slash.fill")
+            Toggle(isOn: Binding(
+                get: { speaker.isEnabled },
+                set: { speaker.isEnabled = $0 }
+            )) {
+                Image(systemName: speaker.isEnabled ? "speaker.wave.2.fill" : "speaker.slash.fill")
                     .foregroundStyle(.white)
             }
             .toggleStyle(.switch)
@@ -138,3 +136,4 @@ private struct CameraFeedView: View {
         }
     }
 }
+

@@ -11,9 +11,9 @@ struct ColorDetectionView: View {
     @StateObject var viewModel: ColorDetectionViewModel
 
     var body: some View {
-        // Placeholder UI; replace with your actual color detection screen
         NavigationStack {
-            CameraView()
+            // Inyectamos processor y speaker que controla el ViewModel
+            CameraView(processor: viewModel.processor, speaker: viewModel.speaker)
                 .navigationTitle("Color")
                 .navigationBarTitleDisplayMode(.inline)
         }
@@ -24,3 +24,4 @@ struct ColorDetectionView: View {
     // Simple preview stub with a fresh SettingsStore
     ColorDetectionView(viewModel: ColorDetectionViewModel(settings: SettingsStore()))
 }
+
