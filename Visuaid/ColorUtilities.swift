@@ -5,7 +5,7 @@
 //  Created by You on 11/11/25.
 //
 //  Conversiones RGB↔HSV↔Lab y naming de color dominante.
-//  Mejora: cálculo robusto de color dominante con ROI, ponderación y hue circular.
+//  Mejora: cálculo robusto de color dominante, CIELab + ΔE2000 y paleta de nombres.
 //
 
 import CoreGraphics
@@ -59,7 +59,16 @@ enum ProcessingMode: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+struct NamedRGB {
+    let name: String
+    let r: CGFloat
+    let g: CGFloat
+    let b: CGFloat
+}
+
 struct ColorUtilities {
+
+    // MARK: - RGB ↔ HSV
 
     // RGB (0...1) → HSV
     static func rgbToHSV(r: CGFloat, g: CGFloat, b: CGFloat) -> HSV {
@@ -85,8 +94,9 @@ struct ColorUtilities {
         return HSV(h: h, s: s, v: v)
     }
 
-    // Aproximación sRGB D65 → XYZ → Lab
-    static func rgbToLab(r: CGFloat, g: CGFloat, b: CGFloat) -> Lab {
+    // MARK: - sRGB (D65) → XYZ → Lab
+
+    static func rgbToXYZ(r: CGFloat, g: CGFloat, b: CGFloat) -> (CGFloat, CGFloat, CGFloat) {
         func pivotRGB(_ c: CGFloat) -> CGFloat {
             return (c <= 0.04045) ? (c / 12.92) : pow((c + 0.055) / 1.055, 2.4)
         }
@@ -98,15 +108,19 @@ struct ColorUtilities {
         let X = (0.4124564 * R + 0.3575761 * G + 0.1804375 * B)
         let Y = (0.2126729 * R + 0.7151522 * G + 0.0721750 * B)
         let Z = (0.0193339 * R + 0.1191920 * G + 0.9503041 * B)
+        return (X, Y, Z)
+    }
 
-        // Normaliza por blanco de referencia D65
+    static func xyzToLab(X: CGFloat, Y: CGFloat, Z: CGFloat) -> Lab {
+        // Blanco de referencia D65
         let Xn: CGFloat = 0.95047
         let Yn: CGFloat = 1.00000
         let Zn: CGFloat = 1.08883
 
         func f(_ t: CGFloat) -> CGFloat {
             let delta: CGFloat = 6.0 / 29.0
-            return (t > pow(delta, 3)) ? pow(t, 1.0/3.0) : (t / (3 * pow(delta, 2)) + 4.0/29.0)
+            let delta3 = delta * delta * delta
+            return (t > delta3) ? pow(t, 1.0/3.0) : (t / (3 * delta * delta) + 4.0/29.0)
         }
 
         let fx = f(X / Xn)
@@ -119,6 +133,144 @@ struct ColorUtilities {
         return Lab(L: L, a: a, b: b)
     }
 
+    static func rgbToLab(r: CGFloat, g: CGFloat, b: CGFloat) -> Lab {
+        let (X, Y, Z) = rgbToXYZ(r: r, g: g, b: b)
+        return xyzToLab(X: X, Y: Y, Z: Z)
+    }
+
+    // ΔE2000 (implementación compacta y razonablemente correcta)
+    static func deltaE2000(_ c1: Lab, _ c2: Lab) -> CGFloat {
+        // Convert to doubles for numeric stability
+        let L1 = Double(c1.L), a1 = Double(c1.a), b1 = Double(c1.b)
+        let L2 = Double(c2.L), a2 = Double(c2.a), b2 = Double(c2.b)
+
+        let kL = 1.0, kC = 1.0, kH = 1.0
+
+        let C1 = sqrt(a1 * a1 + b1 * b1)
+        let C2 = sqrt(a2 * a2 + b2 * b2)
+        let Cbar = (C1 + C2) / 2.0
+
+        let G = 0.5 * (1.0 - sqrt(pow(Cbar, 7.0) / (pow(Cbar, 7.0) + pow(25.0, 7.0))))
+        let a1p = (1.0 + G) * a1
+        let a2p = (1.0 + G) * a2
+
+        let C1p = sqrt(a1p * a1p + b1 * b1)
+        let C2p = sqrt(a2p * a2p + b2 * b2)
+
+        func atan2deg(_ y: Double, _ x: Double) -> Double {
+            var ang = atan2(y, x) * 180.0 / .pi
+            if ang < 0 { ang += 360.0 }
+            return ang
+        }
+
+        let h1p = (C1p < 1e-7) ? 0.0 : atan2deg(b1, a1p)
+        let h2p = (C2p < 1e-7) ? 0.0 : atan2deg(b2, a2p)
+
+        let dLp = L2 - L1
+        let dCp = C2p - C1p
+
+        var dhp: Double
+        let dh = h2p - h1p
+        if C1p * C2p == 0 {
+            dhp = 0
+        } else if abs(dh) <= 180 {
+            dhp = dh
+        } else if dh > 180 {
+            dhp = dh - 360
+        } else {
+            dhp = dh + 360
+        }
+        let dHp = 2.0 * sqrt(C1p * C2p) * sin((dhp * .pi / 180.0) / 2.0)
+
+        let Lbar = (L1 + L2) / 2.0
+        let Cbarp = (C1p + C2p) / 2.0
+
+        var hbarp: Double
+        if C1p * C2p == 0 {
+            hbarp = h1p + h2p
+        } else if abs(h1p - h2p) <= 180 {
+            hbarp = (h1p + h2p) / 2.0
+        } else if (h1p + h2p) < 360 {
+            hbarp = (h1p + h2p + 360) / 2.0
+        } else {
+            hbarp = (h1p + h2p - 360) / 2.0
+        }
+
+        let T = 1.0
+            - 0.17 * cos((hbarp - 30) * .pi / 180.0)
+            + 0.24 * cos((2 * hbarp) * .pi / 180.0)
+            + 0.32 * cos((3 * hbarp + 6) * .pi / 180.0)
+            - 0.20 * cos((4 * hbarp - 63) * .pi / 180.0)
+
+        let Sl = 1.0 + (0.015 * pow(Lbar - 50.0, 2.0)) / sqrt(20.0 + pow(Lbar - 50.0, 2.0))
+        let Sc = 1.0 + 0.045 * Cbarp
+        let Sh = 1.0 + 0.015 * Cbarp * T
+
+        let delTheta = 30.0 * exp(-pow((hbarp - 275.0) / 25.0, 2.0))
+        let Rc = 2.0 * sqrt(pow(Cbarp, 7.0) / (pow(Cbarp, 7.0) + pow(25.0, 7.0)))
+        let Rt = -Rc * sin(2.0 * delTheta * .pi / 180.0)
+
+        let dE = sqrt(
+            pow(dLp / (kL * Sl), 2.0) +
+            pow(dCp / (kC * Sc), 2.0) +
+            pow(dHp / (kH * Sh), 2.0) +
+            Rt * (dCp / (kC * Sc)) * (dHp / (kH * Sh))
+        )
+        return CGFloat(dE)
+    }
+
+    // MARK: - Paleta de nombres (sRGB 0..1)
+    static let referencePalette: [NamedRGB] = [
+        // Neutros
+        .init(name: "Negro", r: 0.02, g: 0.02, b: 0.02),
+        .init(name: "Blanco", r: 0.98, g: 0.98, b: 0.98),
+        .init(name: "Gris", r: 0.5, g: 0.5, b: 0.5),
+        .init(name: "Gris claro", r: 0.75, g: 0.75, b: 0.75),
+        .init(name: "Gris oscuro", r: 0.25, g: 0.25, b: 0.25),
+
+        // Rojos / Naranjas / Amarillos
+        .init(name: "Rojo", r: 0.90, g: 0.10, b: 0.10),
+        .init(name: "Rojo oscuro", r: 0.55, g: 0.05, b: 0.05),
+        .init(name: "Naranja", r: 0.95, g: 0.55, b: 0.10),
+        .init(name: "Amarillo", r: 0.95, g: 0.90, b: 0.10),
+
+        // Verdes / Cian
+        .init(name: "Verde", r: 0.10, g: 0.75, b: 0.20),
+        .init(name: "Verde oscuro", r: 0.05, g: 0.40, b: 0.10),
+        .init(name: "Cian", r: 0.10, g: 0.80, b: 0.85),
+        .init(name: "Turquesa", r: 0.18, g: 0.70, b: 0.60),
+
+        // Azules / Violetas
+        .init(name: "Azul", r: 0.10, g: 0.35, b: 0.90),
+        .init(name: "Azul marino", r: 0.05, g: 0.10, b: 0.35),
+        .init(name: "Índigo", r: 0.25, g: 0.20, b: 0.55),
+        .init(name: "Violeta", r: 0.60, g: 0.30, b: 0.85),
+        .init(name: "Magenta", r: 0.85, g: 0.20, b: 0.75),
+        .init(name: "Rosa", r: 0.95, g: 0.55, b: 0.80),
+
+        // Marrones / Beige
+        .init(name: "Marrón", r: 0.45, g: 0.25, b: 0.10),
+        .init(name: "Beige", r: 0.88, g: 0.80, b: 0.65)
+    ]
+
+    static func nearestNameByDE2000(r: CGFloat, g: CGFloat, b: CGFloat) -> String {
+        let targetLab = rgbToLab(r: r, g: g, b: b)
+        var bestName = "Color"
+        var bestDE: CGFloat = .greatestFiniteMagnitude
+
+        for ref in referencePalette {
+            let lab = rgbToLab(r: ref.r, g: ref.g, b: ref.b)
+            let de = deltaE2000(targetLab, lab)
+            if de < bestDE {
+                bestDE = de
+                bestName = ref.name
+            }
+        }
+        return bestName
+    }
+
+    // MARK: - Utilidades de lectura de CGImage (RGBA8)
+
     // Convierte cualquier CGImage a un buffer RGBA8 contiguo seguro para lectura
     private static func normalizedRGBAData(from cgImage: CGImage) -> (data: [UInt8], bytesPerRow: Int)? {
         let width = cgImage.width
@@ -127,8 +279,7 @@ struct ColorUtilities {
         let bytesPerRow = width * bytesPerPixel
         var data = [UInt8](repeating: 0, count: bytesPerRow * height)
 
-        guard let colorSpace = cgImage.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
-
+        let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
         guard let ctx = CGContext(
             data: &data,
             width: width,
@@ -146,7 +297,7 @@ struct ColorUtilities {
         return (data, bytesPerRow)
     }
 
-    // Dominante robusto:
+    // Dominante robusto (legacy method kept for compatibility):
     // - ROI central (para evitar bordes/fondos)
     // - Descarta píxeles con S baja y V muy bajo/alto extremos
     // - Hue circular ponderado por S y V
@@ -193,7 +344,6 @@ struct ColorUtilities {
                     let r = CGFloat(bytes[offset + 0]) / 255.0
                     let g = CGFloat(bytes[offset + 1]) / 255.0
                     let b = CGFloat(bytes[offset + 2]) / 255.0
-                    // alpha = bytes[offset + 3] (no usado)
 
                     let hsv = rgbToHSV(r: r, g: g, b: b)
 

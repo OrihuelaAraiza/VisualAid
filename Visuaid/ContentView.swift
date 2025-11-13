@@ -10,7 +10,7 @@ import SwiftUI
 struct ContentView: View {
     var body: some View {
         NavigationStack {
-            CameraView()
+            ColorDetectionView(viewModel: ColorDetectionViewModel(settings: SettingsStore()))
                 .navigationTitle("Visuaid")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar {
